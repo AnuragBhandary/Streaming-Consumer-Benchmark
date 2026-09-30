@@ -1,0 +1,7 @@
+{
+  "parse_ns": 176.9,
+  "publish_10_subscribers_ns": 765.7,
+  "publish_100_subscribers_ns": 5675.3,
+  "publish_1000_subscribers_ns": 54941.6,
+  "python": "3.12.14"
+}

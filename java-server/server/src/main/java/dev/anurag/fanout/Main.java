@@ -23,15 +23,20 @@ public final class Main {
         Stats stats = new Stats();
         StreamRegistry registry = new StreamRegistry(config.ringCapacity());
 
-        KafkaSource source = new KafkaSource(config, registry, stats);
-        Thread.ofPlatform().name("kafka-poll").start(source);
+        stats.shards = config.consumers();
+        java.util.List<KafkaSource> sources = new java.util.ArrayList<>();
+        for (int shard = 0; shard < config.consumers(); shard++) {
+            KafkaSource source = new KafkaSource(config, registry, stats, shard, config.consumers());
+            sources.add(source);
+            Thread.ofPlatform().name("kafka-poll-" + shard).start(source);
+        }
 
         try (ServerSocket server = new ServerSocket();
                 ExecutorService connections = Executors.newVirtualThreadPerTaskExecutor()) {
             server.setReuseAddress(true);
             server.bind(new InetSocketAddress(config.port()), 8192);
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-                source.stop();
+                sources.forEach(KafkaSource::stop);
                 try {
                     server.close();
                 } catch (IOException ignored) {

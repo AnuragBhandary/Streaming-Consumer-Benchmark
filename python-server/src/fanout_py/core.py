@@ -210,6 +210,7 @@ async def handle_connection(
     stats: Stats,
     queue_capacity: int,
     max_batch_bytes: int,
+    socket_send_buffer: int = 0,
 ) -> None:
     stats.connections += 1
     stats.accepted += 1
@@ -221,6 +222,8 @@ async def handle_connection(
             import socket
 
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            if socket_send_buffer > 0:  # same cap as the Java server's FANOUT_SNDBUF
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, socket_send_buffer)
         command = (await reader.readline()).decode("ascii", "replace").strip()
         if command == "STATS":
             writer.write(stats.to_json(len(registry.streams)))

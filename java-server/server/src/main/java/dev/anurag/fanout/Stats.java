@@ -11,12 +11,13 @@ final class Stats {
     final LongAdder slowDisconnects = new LongAdder();
     final LongAdder accepted = new LongAdder();
     final AtomicInteger connections = new AtomicInteger();
-    volatile boolean ready = false;
+    final AtomicInteger readyShards = new AtomicInteger();
+    volatile int shards = 1;
 
     String toJson(StreamRegistry registry) {
         Runtime rt = Runtime.getRuntime();
         return "{\"impl\":\"java-virtual-threads\""
-                + ",\"ready\":" + ready
+                + ",\"ready\":" + (readyShards.get() >= shards)
                 + ",\"connections\":" + connections.get()
                 + ",\"accepted\":" + accepted.sum()
                 + ",\"streams\":" + registry.size()

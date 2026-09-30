@@ -4,7 +4,7 @@
 
 x-server: &server
   cpus: 2
-  mem_limit: 1g
+  mem_limit: ${FANOUT_MEM:-1g}
   ulimits:
     nofile: { soft: 65536, hard: 65536 }
   depends_on:
@@ -15,6 +15,7 @@ x-server: &server
     FANOUT_PORT: "7000"
     FANOUT_QUEUE: "1000"
     FANOUT_RING: "10000"
+    FANOUT_SNDBUF: ${FANOUT_SNDBUF:-0}
 
 services:
   kafka:
@@ -51,8 +52,21 @@ services:
   java-server:
     <<: *server
     build: ./java-server
+    environment:
+      <<: *server-env
+      JAVA_TOOL_OPTIONS: ${JAVA_TOOL_OPTIONS:-}
+      FANOUT_CONSUMERS: "1"
     image: fanout-java:latest
     ports: ["7002:7000"]
+
+  # Same Java code with two Kafka dispatch threads (partitions split between them).
+  java2-server:
+    <<: *server
+    image: fanout-java:latest
+    environment:
+      <<: *server-env
+      FANOUT_CONSUMERS: "2"
+    ports: ["7004:7000"]
 
   python-server:
     <<: *server

@@ -16,7 +16,7 @@ import orjson
 import pytest
 from aiokafka import AIOKafkaProducer
 
-SERVERS = {"java": 7002, "python": 7001, "python-2proc": 7003}
+SERVERS = {"java": 7002, "java-2disp": 7004, "python": 7001, "python-2proc": 7003}
 KAFKA = os.environ.get("CONFORMANCE_KAFKA", "localhost:9094")
 
 

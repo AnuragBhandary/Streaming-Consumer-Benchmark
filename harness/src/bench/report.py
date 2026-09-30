@@ -20,13 +20,19 @@ import matplotlib.pyplot as plt
 ROOT = Path(__file__).resolve().parents[3]
 RESULTS = ROOT / "results"
 CHARTS = ROOT / "docs" / "charts"
-IMPLS = ["java", "python", "python-2proc"]
+IMPLS = ["java", "java-2disp", "python", "python-2proc"]
 LABELS = {
-    "java": "Java 21 virtual threads",
+    "java": "Java 21 virtual threads (1 dispatch thread)",
+    "java-2disp": "Java 21 virtual threads (2 dispatch threads)",
     "python": "Python asyncio (1 process)",
     "python-2proc": "Python asyncio (2 processes)",
 }
-COLORS = {"java": "#d9480f", "python": "#1c7ed6", "python-2proc": "#37b24d"}
+COLORS = {
+    "java": "#d9480f",
+    "java-2disp": "#862e9c",
+    "python": "#1c7ed6",
+    "python-2proc": "#37b24d",
+}
 
 
 def load(suite: str) -> list[dict[str, Any]]:
@@ -128,8 +134,8 @@ def table(data: dict[str, dict[float, dict[str, Any]]], xname: str, x_fmt: Any =
 def warmup_chart(runs: list[dict[str, Any]], path: Path) -> str:
     fig, ax = plt.subplots(figsize=(7, 4.2), dpi=150)
     lines = [
-        "| implementation | p99 in seconds 0-5 | p99 in seconds 5-30 | p99 after 30 s |",
-        "|---|---|---|---|",
+        "| implementation | p99, first second | p99, seconds 1-5 | p99, seconds 5-30 | p99 after 30 s |",
+        "|---|---|---|---|---|",
     ]
     for impl in IMPLS:
         series = [r for r in runs if r["run"]["impl"] == impl]
@@ -145,7 +151,8 @@ def warmup_chart(runs: list[dict[str, Any]], path: Path) -> str:
             return statistics.median(values) if values else float("nan")
 
         lines.append(
-            f"| {LABELS[impl]} | {window(0, 5):.1f} | {window(5, 30):.1f} | {window(30, 10**6):.1f} |"
+            f"| {LABELS[impl]} | {window(0, 1):.1f} | {window(1, 5):.1f} | {window(5, 30):.1f} "
+            f"| {window(30, 10**6):.1f} |"
         )
     ax.axvline(30, color="grey", linestyle="--", linewidth=1)
     ax.text(30.5, ax.get_ylim()[1] * 0.9, "end of discarded warm-up", fontsize=8, color="grey")
@@ -162,18 +169,58 @@ def warmup_chart(runs: list[dict[str, Any]], path: Path) -> str:
 
 
 def slow_table(runs: list[dict[str, Any]]) -> str:
-    data = aggregate(runs, "conns")
     rows = [
-        "| implementation | p50 ms | p99 ms | p99.9 ms | slow-client disconnects | resets | CPU % | memory MiB | dup / gap | clients complete |",
-        "|---|---|---|---|---|---|---|---|---|---|",
+        "| implementation | fast clients p50 / p99 ms | stalled clients p50 / p99 ms | server cut-offs per run | resets per run | CPU % | memory MiB | dup / gap | clients complete |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     for impl in IMPLS:
-        for a in data.get(impl, {}).values():
-            rows.append(
-                f"| {LABELS[impl]} | {a['p50']:.1f} | {a['p99']:.1f} | {a['p999']:.1f} "
-                f"| {a['disconnects']:.0f} | {a['resets']:.0f} | {a['cpu']:.0f} | {a['mem']:.0f} "
-                f"| {a['dups']:.0f} / {a['gaps']:.0f} | {a['complete'] * 100:.0f}% |"
+        mine = [r for r in runs if r["run"]["impl"] == impl]
+        if not mine:
+            continue
+
+        def med(fn: Any, rs: list[dict[str, Any]] = mine) -> float:
+            return statistics.median(fn(r) for r in rs)
+
+        def lat(section: str, key: str, rs: list[dict[str, Any]] = mine) -> float:
+            return statistics.median(
+                r["clients"].get(section, {}).get(key, float("nan")) for r in rs
             )
+
+        rows.append(
+            f"| {LABELS[impl]} | {lat('latency_ms', 'p50'):.1f} / {lat('latency_ms', 'p99'):.1f} "
+            f"| {lat('stalled_clients_latency_ms', 'p50'):.1f} / {lat('stalled_clients_latency_ms', 'p99'):,.0f} "
+            f"| {med(lambda r: r['clients']['server_disconnects']):.0f} "
+            f"| {med(lambda r: r['clients']['resets']):.0f} "
+            f"| {med(lambda r: r['server']['cpu_pct_mean']):.0f} | {med(lambda r: r['server']['mem_mib_max']):.0f} "
+            f"| {sum(r['clients']['duplicates'] for r in mine)} / {sum(r['clients']['gaps'] for r in mine)} "
+            f"| {med(lambda r: r['clients']['complete'] / r['clients']['clients']) * 100:.0f}% |"
+        )
+    return "\n".join(rows)
+
+
+WHATIF_LABELS = {
+    "": "baseline: 1 GiB, 1 dispatch thread, 2 carriers",
+    "mem1g-gclog": "same, with GC logging (pauses: 71, 0.39 s total, max 19 ms)",
+    "mem2g-gclog": "2 GiB memory limit (pauses: 59, 0.41 s total)",
+    "carriers4": "4 carrier threads (-Djdk.virtualThreadScheduler.parallelism=4)",
+    "threadprobe": "repeat, sampling per-thread CPU (one carrier ~81%, the other ~8%)",
+    "jfr": "repeat under JFR profiling (observer effect: timing perturbed)",
+    "consumers2": "2 dispatch threads (FANOUT_CONSUMERS=2): carriers ~52% / ~52%",
+}
+
+
+def whatif_table(runs: list[dict[str, Any]], baseline: list[dict[str, Any]]) -> str:
+    rows = [
+        "| Java, 20,000 connections, 200,000 deliveries/s | p50 ms | p99 ms | CPU % (of 200) | memory MiB |",
+        "|---|---|---|---|---|",
+    ]
+    base = [b for b in baseline if b["run"]["impl"] == "java" and b["run"]["conns"] == 20000][:1]
+    for r in base + sorted(runs, key=lambda r: r["run"].get("variant", "")):
+        m = metrics(r)
+        label = WHATIF_LABELS.get(r["run"].get("variant", ""), r["run"].get("variant", ""))
+        rows.append(
+            f"| {label} | {m['p50']:.1f} | {m['p99']:.1f} | {m['cpu']:.0f} | {m['mem']:.0f} |"
+        )
     return "\n".join(rows)
 
 
@@ -223,10 +270,22 @@ def main() -> None:
         sections.append("\n## Saturation (2,000 connections, 100 streams)\n")
         sections.append(table(data, "offered deliveries/s", lambda r: f"{int(offered(r)):,}"))
 
+    whatif = load("whatif")
+    if whatif:
+        sections.append("\n## Java at 20,000 connections: what-if runs\n")
+        sections.append(whatif_table(whatif, scaling))
+
+    slow_os = load("slow-os-buffers")
+    if slow_os:
+        sections.append(
+            "\n## Slow consumers, OS-default socket buffers (5% of clients stall 10 s every 30 s)\n"
+        )
+        sections.append(slow_table(slow_os))
+
     slow = load("slow")
     if slow:
         sections.append(
-            "\n## Slow consumers (1,000 connections, 500 events/s, 5% of clients stall 5 s every 15 s)\n"
+            "\n## Slow consumers, SO_SNDBUF capped at 64 KiB (5% of clients stall 20 s every 30 s)\n"
         )
         sections.append(slow_table(slow))
 

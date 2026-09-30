@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import socket
 import statistics
 import subprocess
@@ -26,6 +27,7 @@ from typing import Any
 NETWORK = "streaming-consumer-benchmark_default"
 SERVERS = {
     "java": ("java-server", 7002),
+    "java-2disp": ("java2-server", 7004),
     "python": ("python-server", 7001),
     "python-2proc": ("python2-server", 7003),
 }
@@ -42,15 +44,20 @@ class Run:
     warmup_s: float = 30
     measure_s: float = 60
     stall_fraction: float = 0.0
+    stall_every_s: float = 15
+    stall_for_s: float = 5
     payload_bytes: int = 200
     client_procs: int = 6
     timeline: bool = False
+    variant: str = ""  # free-form label, e.g. the memory limit of a what-if run
+    sndbuf: int = 0  # server SO_SNDBUF cap (0 = OS default)
     rep: int = 1
 
     @property
     def name(self) -> str:
         stall = f"-stall{int(self.stall_fraction * 100)}" if self.stall_fraction else ""
-        return f"{self.impl}-c{self.conns}-r{int(self.rate)}{stall}-rep{self.rep}"
+        variant = f"-{self.variant}" if self.variant else ""
+        return f"{self.impl}-c{self.conns}-r{int(self.rate)}{stall}{variant}-rep{self.rep}"
 
 
 def suites(reps: int) -> dict[str, list[Run]]:
@@ -82,9 +89,30 @@ def suites(reps: int) -> dict[str, list[Run]]:
             for r in range(1, reps + 1)
             for i in impls
         ],
-        # 5% of clients stop reading for 5 s every 15 s.
+        # What-if for the Java 20k-connection result: same run under a different memory limit
+        # (FANOUT_MEM=2g BENCH_VARIANT=mem2g ...), to test whether heap pressure explains it.
+        "whatif": [
+            Run("whatif", "java", 20000, 1000, variant=os.environ.get("BENCH_VARIANT", ""), rep=r)
+            for r in range(1, reps + 1)
+        ],
+        # 5% of clients stop reading for 20 s every 30 s, at 100 events/s per client: a stall
+        # backs up ~2,000 events (~500 KB). With the server's socket send buffer capped at 64 KiB
+        # and a 16 KiB client receive window, that overflows the 1,000-event queue, so the client
+        # is cut off and resumes from its cursor. (With OS-default buffers, Linux auto-grows the
+        # send buffer to 4 MiB and silently absorbs the whole stall: see RESULTS.md.)
         "slow": [
-            Run("slow", i, 1000, 500, stall_fraction=0.05, rep=r)
+            Run(
+                "slow",
+                i,
+                1000,
+                2000,
+                streams=20,
+                stall_fraction=0.05,
+                stall_every_s=30,
+                stall_for_s=20,
+                sndbuf=65536,
+                rep=r,
+            )
             for r in range(1, reps + 1)
             for i in impls
         ],
@@ -176,6 +204,7 @@ async def execute(run: Run) -> dict[str, Any]:
     service, port = SERVERS[run.impl]
     # Only the server under test runs: idle servers would still consume Kafka and use CPU.
     others = [svc for svc, _ in SERVERS.values() if svc != service]
+    os.environ["FANOUT_SNDBUF"] = str(run.sndbuf)  # read by docker compose interpolation
     await asyncio.to_thread(sh, "docker", "compose", "stop", *others)
     await asyncio.to_thread(
         sh, "docker", "compose", "up", "-d", "--force-recreate", "--no-deps", service
@@ -188,6 +217,7 @@ async def execute(run: Run) -> dict[str, Any]:
         ["bench.clients", "--server", f"{service}:7000", "--conns", str(run.conns),
          "--streams", str(run.streams), "--procs", str(run.client_procs),
          "--stall-fraction", str(run.stall_fraction),
+         "--stall-every-s", str(run.stall_every_s), "--stall-for-s", str(run.stall_for_s),
          *(["--timeline"] if run.timeline else [])],
         cpus="6",
     )  # fmt: skip
@@ -287,7 +317,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--suite",
-        choices=["smoke", "probe", "scaling", "saturation", "slow", "warmup"],
+        choices=["smoke", "probe", "scaling", "saturation", "slow", "warmup", "whatif"],
         required=True,
     )
     parser.add_argument("--reps", type=int, default=1)

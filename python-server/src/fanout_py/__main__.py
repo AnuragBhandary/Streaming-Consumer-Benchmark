@@ -25,6 +25,7 @@ class Config:
     ring_capacity: int
     max_batch_bytes: int
     workers: int
+    socket_send_buffer: int
 
     @classmethod
     def from_env(cls) -> Config:
@@ -37,6 +38,7 @@ class Config:
             ring_capacity=int(env.get("FANOUT_RING", "10000")),
             max_batch_bytes=int(env.get("FANOUT_MAX_BATCH_BYTES", "65536")),
             workers=int(env.get("FANOUT_WORKERS", "1")),
+            socket_send_buffer=int(env.get("FANOUT_SNDBUF", "0")),
         )
 
 
@@ -82,6 +84,7 @@ async def serve(config: Config) -> None:
         stats=stats,
         queue_capacity=config.queue_capacity,
         max_batch_bytes=config.max_batch_bytes,
+        socket_send_buffer=config.socket_send_buffer,
     )
     server = await asyncio.start_server(
         handler, port=config.port, backlog=8192, limit=1024, reuse_port=config.workers > 1

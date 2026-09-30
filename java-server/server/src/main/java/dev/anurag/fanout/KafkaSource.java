@@ -23,12 +23,21 @@ final class KafkaSource implements Runnable {
     private final Config config;
     private final StreamRegistry registry;
     private final Stats stats;
+    private final int shard;
+    private final int shards;
     private volatile boolean running = true;
 
-    KafkaSource(Config config, StreamRegistry registry, Stats stats) {
+    /**
+     * {@code shard} of {@code shards}: this consumer owns partitions p where p % shards == shard.
+     * A stream lives on one partition (Kafka key = stream), so sharding by partition keeps every
+     * stream's order while spreading the dispatch work over several threads.
+     */
+    KafkaSource(Config config, StreamRegistry registry, Stats stats, int shard, int shards) {
         this.config = config;
         this.registry = registry;
         this.stats = stats;
+        this.shard = shard;
+        this.shards = shards;
     }
 
     static Properties consumerProperties(String bootstrap) {
@@ -49,11 +58,13 @@ final class KafkaSource implements Runnable {
     @Override
     public void run() {
         try (var consumer = new KafkaConsumer<byte[], byte[]>(consumerProperties(config.kafkaBootstrap()))) {
-            List<TopicPartition> partitions = waitForPartitions(consumer);
+            List<TopicPartition> partitions = waitForPartitions(consumer).stream()
+                    .filter(tp -> tp.partition() % shards == shard)
+                    .toList();
             consumer.assign(partitions);
             consumer.seekToEnd(partitions);
             partitions.forEach(consumer::position); // resolve the end offsets now, not lazily
-            stats.ready = true;
+            stats.readyShards.incrementAndGet();
             log.info("consuming {} partitions of {}", partitions.size(), config.topic());
             while (running) {
                 for (ConsumerRecord<byte[], byte[]> record : consumer.poll(Duration.ofMillis(100))) {

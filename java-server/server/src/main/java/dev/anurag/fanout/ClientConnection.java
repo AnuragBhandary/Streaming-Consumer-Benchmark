@@ -1,9 +1,8 @@
 package dev.anurag.fanout;
 
 import java.io.BufferedOutputStream;
-import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.InputStreamReader;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
@@ -27,6 +26,8 @@ final class ClientConnection implements Runnable {
     private final Stats stats;
     private final ArrayBlockingQueue<byte[]> queue;
     private final int maxBatchBytes;
+    private final int writeBufferBytes;
+    private final int socketSendBuffer;
     private volatile boolean slow = false;
 
     ClientConnection(Socket socket, StreamRegistry registry, Stats stats, Config config) {
@@ -35,6 +36,8 @@ final class ClientConnection implements Runnable {
         this.stats = stats;
         this.queue = new ArrayBlockingQueue<>(config.queueCapacity());
         this.maxBatchBytes = config.maxBatchBytes();
+        this.writeBufferBytes = config.writeBufferBytes();
+        this.socketSendBuffer = config.socketSendBuffer();
     }
 
     /** Called by the Kafka thread while holding the stream lock: must never block. */
@@ -73,10 +76,16 @@ final class ClientConnection implements Runnable {
         StreamState stream = null;
         try (socket) {
             socket.setTcpNoDelay(true);
-            var in = new BufferedReader(
-                    new InputStreamReader(socket.getInputStream(), StandardCharsets.US_ASCII), 256);
-            var out = new BufferedOutputStream(socket.getOutputStream(), maxBatchBytes);
-            String command = in.readLine();
+            if (socketSendBuffer > 0) {
+                // Caps kernel memory per connection (Linux otherwise auto-grows it to MBs), so a
+                // stalled client's backlog reaches our bounded queue instead of hiding in the kernel.
+                socket.setSendBufferSize(socketSendBuffer);
+            }
+            // Per-connection memory matters at 10k+ connections: no Reader (an InputStreamReader
+            // allocates an 8 KiB decode buffer) and a small write buffer (larger batches bypass it).
+            InputStream in = socket.getInputStream();
+            var out = new BufferedOutputStream(socket.getOutputStream(), writeBufferBytes);
+            String command = readCommand(in);
             if (command == null) {
                 return;
             }
@@ -126,10 +135,11 @@ final class ClientConnection implements Runnable {
      * interrupts the writer on EOF. Two threads per connection cost almost nothing when they are
      * virtual: this is the blocking-style equivalent of an event loop's "connection lost".
      */
-    private static void watchForDisconnect(BufferedReader in, Thread writer) {
+    private static void watchForDisconnect(InputStream in, Thread writer) {
         Thread.ofVirtual().start(() -> {
             try {
-                while (in.read() != -1) {
+                byte[] sink = new byte[64];
+                while (in.read(sink) != -1) {
                     // clients send nothing after SUB; ignore anything that arrives
                 }
             } catch (IOException ignored) {
@@ -137,6 +147,21 @@ final class ClientConnection implements Runnable {
             }
             writer.interrupt();
         });
+    }
+
+    /** Reads one ASCII command line (at most 256 bytes) without a buffered Reader. */
+    static String readCommand(InputStream in) throws IOException {
+        var line = new StringBuilder(32);
+        int b;
+        while ((b = in.read()) != -1 && b != '\n') {
+            if (line.length() >= 256) {
+                return "";
+            }
+            if (b != '\r') {
+                line.append((char) b);
+            }
+        }
+        return b == -1 && line.isEmpty() ? null : line.toString();
     }
 
     private void writeLoop(OutputStream out) throws IOException, InterruptedException {

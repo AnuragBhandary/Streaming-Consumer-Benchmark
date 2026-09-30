@@ -9,7 +9,10 @@ public record Config(
         int port,
         int queueCapacity,
         int ringCapacity,
-        int maxBatchBytes) {
+        int maxBatchBytes,
+        int writeBufferBytes,
+        int socketSendBuffer,
+        int consumers) {
 
     public static Config fromEnv() {
         return fromMap(System.getenv());
@@ -22,6 +25,9 @@ public record Config(
                 Integer.parseInt(env.getOrDefault("FANOUT_PORT", "7000")),
                 Integer.parseInt(env.getOrDefault("FANOUT_QUEUE", "1000")),
                 Integer.parseInt(env.getOrDefault("FANOUT_RING", "10000")),
-                Integer.parseInt(env.getOrDefault("FANOUT_MAX_BATCH_BYTES", "65536")));
+                Integer.parseInt(env.getOrDefault("FANOUT_MAX_BATCH_BYTES", "65536")),
+                Integer.parseInt(env.getOrDefault("FANOUT_WRITE_BUFFER_BYTES", "8192")),
+                Integer.parseInt(env.getOrDefault("FANOUT_SNDBUF", "0")), // 0 = OS default
+                Integer.parseInt(env.getOrDefault("FANOUT_CONSUMERS", "1")));
     }
 }

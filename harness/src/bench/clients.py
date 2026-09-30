@@ -18,6 +18,7 @@ import argparse
 import asyncio
 import multiprocessing as mp
 import random
+import socket
 import sys
 import time
 from multiprocessing.connection import Connection
@@ -30,7 +31,8 @@ from bench.hist import Histogram
 
 class Stats:
     def __init__(self) -> None:
-        self.hist = Histogram()
+        self.hist = Histogram()  # clients that keep reading
+        self.stall_hist = Histogram()  # clients that periodically stop reading
         self.measuring = False
         self.received_in_window = 0
         self.received = 0
@@ -94,7 +96,7 @@ class Subscriber(asyncio.Protocol):
                 hist.record(now_ms - event["sent_at"])
             if stats.measuring:
                 stats.received_in_window += 1
-                stats.hist.record(now_ms - event["sent_at"])
+                (stats.stall_hist if self.stall else stats.hist).record(now_ms - event["sent_at"])
 
     def connection_lost(self, exc: Exception | None) -> None:
         self.transport = None
@@ -129,7 +131,20 @@ class Pool:
     async def connect(self, sub: Subscriber) -> None:
         for attempt in range(50):
             try:
-                await self.loop.create_connection(lambda: sub, self.host, self.port)
+                if sub.stall:
+                    # A small receive window, like a congested mobile client: when it stops
+                    # reading, the backlog lands in the server's queue instead of in megabytes
+                    # of kernel buffers.
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 16 * 1024)
+                    sock.setblocking(False)
+                    info = await self.loop.getaddrinfo(
+                        self.host, self.port, family=socket.AF_INET, type=socket.SOCK_STREAM
+                    )
+                    await self.loop.sock_connect(sock, info[0][4])
+                    await self.loop.create_connection(lambda: sub, sock=sock)
+                else:
+                    await self.loop.create_connection(lambda: sub, self.host, self.port)
                 return
             except OSError:
                 await asyncio.sleep(min(2.0, 0.05 * 2**attempt) * random.random())
@@ -207,6 +222,7 @@ async def _worker(cfg: dict[str, Any], pipe: Connection) -> None:
                 "resets": st.resets,
                 "server_disconnects": st.server_disconnects,
                 "hist": st.hist.to_json(),
+                "stall_hist": st.stall_hist.to_json(),
                 "timeline": {str(k): v.to_json() for k, v in st.timeline.items()},
             },
         )
@@ -293,10 +309,12 @@ async def orchestrate(args: argparse.Namespace) -> None:
     if probe:
         probe.cancel()
     merged = Histogram()
+    stalled = Histogram()
     timeline: dict[int, Histogram] = {}
     totals: dict[str, int] = {}
     for _, result in results:
         merged.merge(result.pop("hist"))
+        stalled.merge(result.pop("stall_hist"))
         for second, counts in result.pop("timeline").items():
             timeline.setdefault(int(second), Histogram()).merge(counts)
         for key, value in result.items():
@@ -307,6 +325,7 @@ async def orchestrate(args: argparse.Namespace) -> None:
             **totals,
             "throughput_per_s": round(totals["received_in_window"] / float(measure_s), 1),
             "latency_ms": merged.summary(),
+            "stalled_clients_latency_ms": stalled.summary(),
             "hist": merged.to_json(),
             "kafka_only_latency_ms": probe_hist.summary(),
             "timeline": [{"second": sec, **timeline[sec].summary()} for sec in sorted(timeline)],
