@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  java:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: java-server } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: "21", cache: maven }
+      - name: Unit + server tests, fat jar, JMH jar
+        run: mvn -B -ntp verify
+
+  python-server:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: python-server } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen
+      - run: uv run ruff check . && uv run ruff format --check .
+      - run: uv run mypy
+      - run: uv run pytest -q --cov --cov-report=term
+
+  harness:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: harness } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen
+      - run: uv run ruff check . && uv run ruff format --check .
+      - run: uv run mypy
+      - run: uv run pytest -q tests/test_hist.py
+
+  conformance:
+    name: conformance (both servers, real Kafka)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Start Kafka and all three servers
+        run: docker compose up -d --build --wait kafka java-server python-server python2-server
+      - name: Identical behaviour from every implementation
+        working-directory: harness
+        run: |
+          uv sync --frozen
+          uv run pytest -v tests/test_conformance.py
+      - name: Smoke benchmark (a few seconds per server)
+        working-directory: harness
+        run: |
+          docker compose --profile tools build harness
+          uv run python -m bench.run --suite smoke
+          test "$(ls ../results/smoke/*.json | wc -l)" -eq 3
+      - if: failure()
+        run: docker compose logs --tail 200

@@ -1,0 +1,75 @@
+# Kafka plus the two fan-out servers under identical resource limits.
+#   docker compose up -d --build --wait
+# The harness image is built here and run by bench.run (docker run on this network).
+
+x-server: &server
+  cpus: 2
+  mem_limit: 1g
+  ulimits:
+    nofile: { soft: 65536, hard: 65536 }
+  depends_on:
+    topic: { condition: service_completed_successfully }
+  environment: &server-env
+    FANOUT_KAFKA: kafka:9092
+    FANOUT_TOPIC: events
+    FANOUT_PORT: "7000"
+    FANOUT_QUEUE: "1000"
+    FANOUT_RING: "10000"
+
+services:
+  kafka:
+    image: apache/kafka:3.9.0
+    cpus: 2
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 12
+      KAFKA_LOG_RETENTION_MS: 3600000
+    ports: ["9094:9094"]
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 3s
+      timeout: 10s
+      retries: 40
+
+  topic:
+    image: apache/kafka:3.9.0
+    depends_on:
+      kafka: { condition: service_healthy }
+    entrypoint: ["/opt/kafka/bin/kafka-topics.sh", "--bootstrap-server", "kafka:9092", "--create",
+                 "--if-not-exists", "--topic", "events", "--partitions", "12", "--replication-factor", "1"]
+
+  java-server:
+    <<: *server
+    build: ./java-server
+    image: fanout-java:latest
+    ports: ["7002:7000"]
+
+  python-server:
+    <<: *server
+    build: ./python-server
+    image: fanout-python:latest
+    ports: ["7001:7000"]
+
+  # Same Python code, two event loops (two processes sharing the port via SO_REUSEPORT).
+  python2-server:
+    <<: *server
+    image: fanout-python:latest
+    environment:
+      <<: *server-env
+      FANOUT_WORKERS: "2"
+    ports: ["7003:7000"]
+
+  harness:
+    build: ./harness
+    image: fanout-harness:latest
+    profiles: ["tools"]
