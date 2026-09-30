@@ -59,7 +59,7 @@ jobs:
         working-directory: harness
         run: |
           docker compose --profile tools build harness
-          uv run python -m bench.run --suite smoke
+          BENCH_CLIENT_CPUS=2 uv run python -m bench.run --suite smoke
           test "$(ls ../results/smoke/*.json | wc -l)" -eq 4
       - if: failure()
         run: docker compose logs --tail 200

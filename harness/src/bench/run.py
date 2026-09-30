@@ -219,7 +219,7 @@ async def execute(run: Run) -> dict[str, Any]:
          "--stall-fraction", str(run.stall_fraction),
          "--stall-every-s", str(run.stall_every_s), "--stall-for-s", str(run.stall_for_s),
          *(["--timeline"] if run.timeline else [])],
-        cpus="6",
+        cpus=os.environ.get("BENCH_CLIENT_CPUS", "6"),
     )  # fmt: skip
     await clients.start()
     ready = await clients.expect("READY", 300)

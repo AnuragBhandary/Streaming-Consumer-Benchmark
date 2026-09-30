@@ -29,7 +29,7 @@ class ServerTest {
 
     @BeforeEach
     void start() throws IOException {
-        Config config = Config.fromMap(Map.of("FANOUT_QUEUE", "50", "FANOUT_RING", "100", "FANOUT_MAX_BATCH_BYTES", "4096"));
+        Config config = Config.fromMap(Map.of("FANOUT_QUEUE", "300", "FANOUT_RING", "100", "FANOUT_MAX_BATCH_BYTES", "4096"));
         registry = new StreamRegistry(config.ringCapacity());
         stats = new Stats();
         server = new ServerSocket();
@@ -127,7 +127,7 @@ class ServerTest {
                 // socket closed at test end
             }
         });
-        for (long seq = 1; seq <= 2000 && stats.slowDisconnects.sum() == 0; seq++) {
+        for (long seq = 1; seq <= 10_000 && stats.slowDisconnects.sum() == 0; seq++) {
             byte[] raw = ("{\"stream\":\"m\",\"seq\":" + seq + ",\"payload\":\"" + padding + "\"}").getBytes(StandardCharsets.UTF_8);
             for (ClientConnection slow : registry.get("m").publish(EventParser.parse(raw))) {
                 slow.kill();
